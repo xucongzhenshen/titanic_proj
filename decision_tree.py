@@ -1,16 +1,18 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import numpy as np
 
-
 from k_fold import *
 
-#分裂基准   ( : ]
-'''信息熵'''
+
+# 信息熵
 def Ent(df):
     p = df['Survived'].mean()
     q = 1 - p
-    return -p*np.log2(p) - q*np.log2(q)
-'''信息增益'''
+    return -p * np.log2(p) - q * np.log2(q)
+# 信息增益
 def gain(df, name, boundary):
     ent1 = Ent(df.loc[df[name] > boundary, 'Survived'])
     ent2 = Ent(df.loc[df[name] <= boundary, 'Survived'])
@@ -18,58 +20,58 @@ def gain(df, name, boundary):
     p1 = df.loc[df[name] > boundary, 'Survived'].size / df['Survived'].size
     p2 = 1 - p1
     return ent - p1 * ent1 - p2 * ent2
-'''信息增益率'''
+# 信息增益率
 def gain_rate(df, name, boundary):
     p = df.loc[df[name] > boundary, 'Survived'].size / df['Survived'].size
     q = 1 - p
-    tv = -p*np.log2(p) - q*np.log2(q)
-    return gain(df, name, boundary)/tv
-'''Gini'''
+    tv = -p * np.log2(p) - q * np.log2(q)
+    return gain(df, name, boundary) / tv
+# Gini
 def gini(df):
     p = df['Survived'].mean()
     q = 1 - p
-    return 1 - p**2 - q**2
-'''Gini指数, 实际返回1 - gini_index'''
+    return 1 - p ** 2 - q ** 2
+# Gini指数, 实际返回1 - gini_index
 def neg_gini_index(df, name, boundary):
     p1 = df.loc[df[name] > boundary, 'Survived'].size / df['Survived'].size
     p2 = 1 - p1
-    gini_ = p1*gini(df[df[name] > boundary]) + p2*gini(df[df[name] <= boundary])
+    gini_ = p1 * gini(df[df[name] > boundary]) + p2 * gini(df[df[name] <= boundary])
     return 1 - gini_
 
-#选择最佳分类点
+'''分裂基准   ( : ]'''
+# 选择最佳分类点
 def choose_boundary(data, name, f):
     best_boundary = 0
     best_gain = 0
-    #连续值
+    # 连续值
     q = 10
     if data[name].nunique(dropna=True) > q:
-        bins = pd.qcut(data[name], q, retbins= True, duplicates = 'drop')[1]
+        bins = pd.qcut(data[name], q, retbins=True, duplicates='drop')[1]
         for i in range(1, np.size(bins) - 2):
             if f(data, name, bins[i]) > best_gain:
                 best_boundary = bins[i]
                 best_gain = f(data, name, best_boundary)
-    #0 or 1
+    # 0 or 1
     elif data[name].nunique(dropna=True) == 2:
         best_boundary = 0.5
         best_gain = f(data, name, 0.5)
-    #离散值
+    # 离散值
     else:
         val_list = np.unique(data[name])
-        boundary_list = (val_list[1:]+val_list[:-1])/2
+        boundary_list = (val_list[1:] + val_list[:-1]) / 2
         best_gain = 0
         for b in boundary_list:
             if f(data, name, b) > best_gain:
                 best_gain = f(data, name, b)
                 best_boundary = b
     return best_boundary, best_gain
-
-#选择最佳分类特征
+# 选择最佳分类特征
 def choose_feature(data, f):
     best_gain = 0
-    best_feature = ''
+    best_feature = None
     best_boundary = 0
     for name in data.columns:
-        if name != 'Survived':
+        if name not in ['Survived', 'weight']:
             boundary, gain = choose_boundary(data, name, f)
             if gain > best_gain:
                 best_gain = gain
@@ -77,56 +79,77 @@ def choose_feature(data, f):
                 best_boundary = boundary
     return best_feature, best_boundary
 
-#树分裂
-'''分裂后处理'''
-def possess(data, nan_data, name, f):
+'''树分裂'''
+# 分裂后处理
+def possess(data, nan_data, name, f, depth):
     data_ = pd.concat([data, nan_data])
-    tree_dict = {}
-    if data[name].nunique(dropna=True) > 1 and data_['Survived'].nunique(dropna=True) > 1:
-        tree_dict = build_tree(data_, f)
-    elif data[name].nunique(dropna=True) == 1 and data_['Survived'].nunique(dropna=True) > 1:
-        data.drop([name], axis=1)
-        if data.columns.size == 1:
-            w_sum = data_['weight'].sum()
-            prob = np.sum(np.array(data_['weight']) * np.array(data_['Survived'])) / w_sum
-            tree_dict = prob
+    if data[name].nunique(dropna=True) == 1:
+        data_.drop([name], axis=1)
+    if data_['Survived'].nunique(dropna=True) == 1 or data.columns.size == 1 or len(data) < 5:
+        tree_dict = cal_label(data_)
     else:
-        tree_dict = data['Survived'].iloc[0]
+        tree_dict = build_tree(data_, f, max_depth, depth + 1)
     return tree_dict
-'''{name > boundary: {0: {}, 1: {}}'''
-def build_tree(data, f):
+# {name > boundary: {0: {}, 1: {}}, weight = true rate
+def build_tree(data, f, max_depth, depth=0):
     name, boundary = choose_feature(data, f)
-    print(name)
-    data1 = data[data[name] <= boundary]
-    data2 = data[data[name] > boundary]
-    data3 = data[data[name].isna()]
+    # 提前终止条件
+    n_samples = len(data)
+    total_weight = data['weight'].sum()
 
-    #calculate weight
-    true_sum = data1['weight'].sum()
-    false_sum = data2['weight'].sum()
-    #weight = true rate
-    weight = true_sum/(true_sum + false_sum)
-    data3_t = data3.copy()
-    data3_f = data3.copy()
-    data3_t['weight'] = data3_t['weight'] * weight
-    data3_f['weight'] = data3_f['weight'] * (1 - weight)
+    # 更多终止条件
+    stop_conditions = [
+        depth >= max_depth,  # 最大深度
+        n_samples < min_samples_split,  # 最小样本数
+        total_weight < min_samples_split,  # 最小权重和
+        data['Survived'].nunique() == 1,  # 纯节点
+        cal_impurity(data) < min_impurity  # 杂质足够低
+    ]
 
-    false_dict = possess(data1, data3_f, name, f)
-    true_dict = possess(data2, data3_t, name, f)
-    return {
-        'feature': name,
-        'boundary': boundary,
-        'False': false_dict,
-        'True': true_dict,
-        'weight':weight
-    }
-#分类
-'''单个分类'''
+    if any(stop_conditions):
+        return cal_label(data)
+    else:
+        data1 = data[data[name] <= boundary]
+        data2 = data[data[name] > boundary]
+        data3 = data[data[name].isna()]
+
+        # calculate weight
+        true_sum = data1['weight'].sum()
+        false_sum = data2['weight'].sum()
+        # weight = true rate
+        weight = true_sum / (true_sum + false_sum + 1e-10)
+        data3_t = data3.copy()
+        data3_f = data3.copy()
+        data3_t['weight'] = data3_t['weight'] * weight
+        data3_f['weight'] = data3_f['weight'] * (1 - weight)
+
+        false_dict = possess(data1, data3_f, name, f, depth)
+        true_dict = possess(data2, data3_t, name, f, depth)
+        branch = {
+            'feature': name,
+            'boundary': boundary,
+            'False': false_dict,
+            'True': true_dict,
+            'weight': weight
+        }
+    return branch
+# 计算标签
+def cal_label(data):
+    w_sum = data['weight'].sum()+1e-10
+    prob = np.sum(np.array(data['weight']) * np.array(data['Survived'])) / w_sum
+    return prob
+# 计算杂度
+def cal_impurity(data):
+    prob = cal_label(data)
+    return min(prob, 1 - prob)
+
+'''分类'''
+# 单个分类
 def tree_classify(sample, tree):
-    if isinstance(tree, dict):
+    if not is_leaf(tree):
         feature = tree['feature']
         boundary = tree['boundary']
-        weight = tree['weight']
+        weight = tree['weight']  # weight = true rate
         if pd.isna(sample[feature]):
             res = weight * tree_classify(sample, tree['True']) + (1 - weight) * tree_classify(sample, tree['False'])
         else:
@@ -134,24 +157,84 @@ def tree_classify(sample, tree):
     else:
         res = tree
     return res
-'''全体分类'''
+# 线程池
+num_workers = os.cpu_count()
+GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=num_workers)
+# 全体分类
 def data_tree_classify(data, tree):
-    return int(tree_classify(data, tree) > 0.5)
+    def process_data(data):
+        return [int(tree_classify(row, tree) > 0.5) for _, row in data.iterrows()]
+
+    future = GLOBAL_EXECUTOR.submit(process_data, data)
+    return future.result()
+# 剪枝
+def is_leaf(tree):
+    return not isinstance(tree, dict)
+def cut_branch(data, tree):
+    name = tree['feature']
+    boundary = tree['boundary']
+    data1 = data[data[name] <= boundary]
+    data2 = data[data[name] > boundary]
+    data3 = data[data[name].isna()]
+
+    weight = tree['weight']
+    data3_t = data3.copy()
+    data3_f = data3.copy()
+    data3_t['weight'] = data3_t['weight'] * weight
+    data3_f['weight'] = data3_f['weight'] * (1 - weight)
+    data_t = pd.concat([data2, data3_t])
+    data_f = pd.concat([data1, data3_f])
+    if not is_leaf(tree['True']):
+        tree['True'] = cut_branch(data_t, tree['True'])
+    if not is_leaf(tree['False']):
+        tree['False'] = cut_branch(data_f, tree['False'])
+    if is_leaf(tree['True']) and is_leaf(tree['False']):
+        impurity0 = cal_impurity(data)
+        impurity_t = cal_impurity(data_t)
+        impurity_f = cal_impurity(data_f)
+        if impurity0 + alpha<= (1 - weight) * impurity_f + weight * impurity_t:
+            tree = cal_label(data)
+    return tree
+
+
+# 画树
+def plt_tree(tree, depth=0):
+    null_str = ""
+    for i in range(depth):
+        null_str += '\t'
+    if isinstance(tree, dict):
+        print(f'{null_str}{tree["feature"]} > {tree["boundary"]}')
+        print(f'{null_str}weight: {tree["weight"]}')
+        print(f'{null_str}True: {{')
+        plt_tree(tree['True'], depth + 1)
+        print(f'{null_str}}}')
+        print(f'{null_str}False: {{')
+        plt_tree(tree['False'], depth + 1)
+        print(f'{null_str}}}')
+    else:
+        print(f'{null_str}class: {tree}')
+
 
 if __name__ == '__main__':
+    min_samples_split = 1
+    min_impurity = 0
+    alpha = 0
     err_list = []
     for train_index, test_index in kf.split(tree_data):
-        #加权重
+        # 加权重
         train_data = tree_data.filter(items=train_index, axis=0)
         train_data['weight'] = 1
         test_data = tree_data.filter(items=test_index, axis=0)
         test_data['weight'] = 1
 
-        #构造树
-        tree = build_tree(train_data, neg_gini_index)
+        # 构造树
+        max_depth = 5
+        tree = build_tree(train_data, neg_gini_index, max_depth=max_depth)
         true_survived = test_data['Survived']
+        tree = cut_branch(test_data, tree)
         res = data_tree_classify(test_data, tree)
-        error = (res - true_survived).mean()
+        error = np.mean(np.array(res) != np.array(true_survived))
+        if error <= 0.13:
+            plt_tree(tree)
         err_list.append(error)
     print(err_list)
-
