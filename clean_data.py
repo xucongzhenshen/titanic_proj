@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 
@@ -55,6 +56,25 @@ class CleanData:
         self.df = self.df.rename(columns={'Sex': 'Is_male'})
         return self
 
+    '''log fare'''
+    def log_feature(self, feature):
+        print(self.df.columns)
+        self.df[feature] = np.log(self.df[feature] + 1)
+        return self
+
+    '''归一化'''
+    def normalization(self):
+        label = None
+        if 'Survived' in self.df.columns:
+            label = self.df['Survived']
+            self.df.drop(columns=['Survived'], inplace = True)
+        df_mean = self.df.mean()
+        df_std = self.df.std()
+        self.df = (self.df - df_mean) / (df_std + 1e-8)     # 特征标准化
+        if label is not None:
+            self.df = pd.concat([label, self.df],axis=1)
+        return self
+
     def save(self, path):
         self.df.to_csv(path, index=False)
 
@@ -77,18 +97,20 @@ class CleanData:
     def __str__(self):
         return str(self.df)
 
-'''train_data = CleanData(train_df).extract_title().imputed_age().clean().fill_Embarked().one_hot_encode(['Title','Embarked']).encode()
+train_data = (CleanData(train_df).extract_title().imputed_age().clean().fill_Embarked()
+              .one_hot_encode(['Title','Embarked']).encode().log_feature('Fare').normalization())
 train_df = train_data.df
 train_data.save('cleaned_data/train.csv')
 
-test_data = CleanData(test_df).extract_title().imputed_age().clean().fill_Embarked().one_hot_encode(['Title','Embarked']).encode()
+test_data = (CleanData(test_df).extract_title().imputed_age().clean().fill_Embarked()
+             .one_hot_encode(['Title','Embarked']).encode().log_feature('Fare').normalization())
 test_df = test_data.df
 test_data.save('cleaned_data/test.csv')
 print(train_df)
-print(test_df)'''
+print(test_df)
 
 
-tree_train_data = CleanData(train_df).extract_title().clean()
+'''tree_train_data = CleanData(train_df).extract_title().clean()
 mapping = tree_train_data.tree_encode_map()
 tree_train_data.tree_encode(['Title','Embarked'], mapping).encode()
 tree_train_data.save('cleaned_data/tree_train.csv')
@@ -96,5 +118,5 @@ print(tree_train_data)
 
 tree_test_data = CleanData(test_df).extract_title().clean().tree_encode(['Title','Embarked'], mapping).encode()
 tree_test_data.save('cleaned_data/tree_test.csv')
-print(tree_test_data)
+print(tree_test_data)'''
 

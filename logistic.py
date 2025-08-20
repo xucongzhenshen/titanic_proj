@@ -11,17 +11,10 @@ def pros_data(data, index):
     y = train_data['Survived'].to_numpy()
     y = y.reshape(-1, 1)
     #X = train_data.drop(['Survived', 'Title_Royal'], axis=1).to_numpy()
-    X=train_data.drop(['Survived', 'Fare'], axis=1).to_numpy()
-    # log Fare
-    fares_=np.log(train_data['Fare'] + 1).to_numpy().reshape(-1, 1)
-    X = np.c_[X, fares_]
+    X=train_data.drop(['Survived'], axis=1).to_numpy()
 
     # 添加偏置项（截距）
     X = np.c_[np.ones((X.shape[0], 1)), X]
-    # 特征标准化
-    X_mean = np.mean(X[:, 1:], axis=0)
-    X_std = np.std(X[:, 1:], axis=0)
-    X[:, 1:] = (X[:, 1:] - X_mean) / (X_std + 1e-8)
     return X,y
 
 #off policy gradient ascend
