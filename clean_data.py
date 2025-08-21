@@ -93,11 +93,54 @@ class CleanData:
             self.df[name] = self.df[name].map(mapping[name])
         return self
 
+    def tree_encode2(self):
+        #encode title
+        title_mapping1 = {
+            'Master': 1,
+            'Miss': 2,
+            'Mr': 3,
+            'Mrs': 4
+        }
+        title_mapping2 = {
+            'Master': 3,
+            'Miss': 1,
+            'Mr': 4,
+            'Mrs': 2
+        }
+        self.df['Title1'] = self.df['Title'].map(title_mapping1)
+        self.df['Title2'] = self.df['Title'].map(title_mapping2)
+        self.df.drop(columns=['Title','Sex'], inplace = True)
+
+        #encode embark
+        embark_mapping1 = {
+            'S': 1,
+            'C': 2,
+            'Q': 3
+        }
+        embark_mapping2 = {
+            'S': 0,
+            'C': 1,
+            'Q': 0
+        }
+        self.df['Embark1'] = self.df['Embarked'].map(embark_mapping1)
+        self.df['Embark2'] = self.df['Embarked'].map(embark_mapping2)
+        self.df.drop(columns=['Embarked'], inplace=True)
+        return self
+
+    def add_feature(self):
+        self.df['Is_alone'] = (self.df['Parch'] == 0) & (self.df['SibSp'] == 0)
+        self.df['Family_size'] = self.df['Parch'] + self.df['SibSp']
+        self.df['Parch-SibSp'] = self.df['Parch'] - self.df['SibSp']
+        return self
+    def change_age(self):
+        age_mean = self.df['Age'].mean()
+        self.df['Age'] = np.abs(self.df['Age'] - age_mean)
+        return self
     #print
     def __str__(self):
         return str(self.df)
 
-train_data = (CleanData(train_df).extract_title().imputed_age().clean().fill_Embarked()
+'''train_data = (CleanData(train_df).extract_title().imputed_age().clean().fill_Embarked()
               .one_hot_encode(['Title','Embarked']).encode().log_feature('Fare').normalization())
 train_df = train_data.df
 train_data.save('cleaned_data/train.csv')
@@ -107,16 +150,16 @@ test_data = (CleanData(test_df).extract_title().imputed_age().clean().fill_Embar
 test_df = test_data.df
 test_data.save('cleaned_data/test.csv')
 print(train_df)
-print(test_df)
+print(test_df)'''
 
 
-'''tree_train_data = CleanData(train_df).extract_title().clean()
-mapping = tree_train_data.tree_encode_map()
-tree_train_data.tree_encode(['Title','Embarked'], mapping).encode()
+tree_train_data = CleanData(train_df).extract_title().clean()
+#mapping = tree_train_data.tree_encode_map()
+tree_train_data.tree_encode2()
 tree_train_data.save('cleaned_data/tree_train.csv')
 print(tree_train_data)
 
-tree_test_data = CleanData(test_df).extract_title().clean().tree_encode(['Title','Embarked'], mapping).encode()
+tree_test_data = CleanData(test_df).extract_title().clean().tree_encode2()
 tree_test_data.save('cleaned_data/tree_test.csv')
-print(tree_test_data)'''
+print(tree_test_data)
 
