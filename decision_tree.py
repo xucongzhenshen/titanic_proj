@@ -1,5 +1,5 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 import pandas as pd
 import numpy as np
@@ -77,27 +77,28 @@ def choose_feature(data, f):
                 best_gain = gain
                 best_feature = name
                 best_boundary = boundary
-    return best_feature, best_boundary
+    return best_feature, best_boundary, best_gain
 
 '''树分裂'''
 # 分裂后处理
-def possess(data, nan_data, name, f, depth):
+def possess(data, nan_data, name, f, hargs, depth):
     data_ = pd.concat([data, nan_data])
     if data[name].nunique(dropna=True) == 1:
         data_.drop([name], axis=1)
     if data_['Survived'].nunique(dropna=True) == 1 or data.columns.size == 1 or len(data) < 5:
         tree_dict = cal_label(data_)
     else:
-        tree_dict = build_tree(data_, f, max_depth, depth + 1)
+        tree_dict = build_tree(data_, f, hargs=hargs, depth = depth + 1)
     return tree_dict
 # {name > boundary: {0: {}, 1: {}}, weight = true rate
-def build_tree(data, f, max_depth, depth=0):
-    name, boundary = choose_feature(data, f)
+def build_tree(data, f, hargs, depth=0):
+    name, boundary, gain = choose_feature(data, f)
     # 提前终止条件
     n_samples = len(data)
     total_weight = data['weight'].sum()
 
     # 更多终止条件
+    max_depth, min_samples_split, min_impurity, alpha = hargs
     stop_conditions = [
         depth >= max_depth,  # 最大深度
         n_samples < min_samples_split,  # 最小样本数
@@ -123,8 +124,8 @@ def build_tree(data, f, max_depth, depth=0):
         data3_t['weight'] = data3_t['weight'] * weight
         data3_f['weight'] = data3_f['weight'] * (1 - weight)
 
-        false_dict = possess(data1, data3_f, name, f, depth)
-        true_dict = possess(data2, data3_t, name, f, depth)
+        false_dict = possess(data1, data3_f, name, f, hargs=hargs, depth=depth)
+        true_dict = possess(data2, data3_t, name, f, hargs=hargs, depth=depth)
         branch = {
             'feature': name,
             'boundary': boundary,
@@ -170,7 +171,7 @@ def data_tree_classify(data, tree):
 # 剪枝
 def is_leaf(tree):
     return not isinstance(tree, dict)
-def cut_branch(data, tree):
+def cut_branch(data, tree, alpha):
     name = tree['feature']
     boundary = tree['boundary']
     data1 = data[data[name] <= boundary]
@@ -185,9 +186,9 @@ def cut_branch(data, tree):
     data_t = pd.concat([data2, data3_t])
     data_f = pd.concat([data1, data3_f])
     if not is_leaf(tree['True']):
-        tree['True'] = cut_branch(data_t, tree['True'])
+        tree['True'] = cut_branch(data_t, tree['True'], alpha)
     if not is_leaf(tree['False']):
-        tree['False'] = cut_branch(data_f, tree['False'])
+        tree['False'] = cut_branch(data_f, tree['False'], alpha)
     if is_leaf(tree['True']) and is_leaf(tree['False']):
         impurity0 = cal_impurity(data)
         impurity_t = cal_impurity(data_t)
@@ -202,39 +203,83 @@ def plt_tree(tree, depth=0):
     null_str = ""
     for i in range(depth):
         null_str += '\t'
-    if isinstance(tree, dict):
-        print(f'{null_str}{tree["feature"]} > {tree["boundary"]}')
-        print(f'{null_str}weight: {tree["weight"]}')
-        print(f'{null_str}True: {{')
-        plt_tree(tree['True'], depth + 1)
-        print(f'{null_str}}}')
-        print(f'{null_str}False: {{')
-        plt_tree(tree['False'], depth + 1)
-        print(f'{null_str}}}')
+    print(f'{null_str}\033[91m{tree["feature"]} > {tree["boundary"]}\033[0m, weight: {tree["weight"]}')
+    tree_t = tree['True']
+    tree_f = tree['False']
+    if is_leaf(tree_t):
+        print(f'{null_str}True: class: {tree_t}')
     else:
-        print(f'{null_str}class: {tree}')
+        print(f'{null_str}True: {{')
+        plt_tree(tree_t, depth + 1)
+        print(f'{null_str}}}')
+    if is_leaf(tree_f):
+        print(f'{null_str}False: class: {tree_f}')
+    else:
+        print(f'{null_str}False: {{')
+        plt_tree(tree_f, depth + 1)
+        print(f'{null_str}}}')
 
+
+# 评估性能
+def train_and_evaluate_fold(args):
+    train_index, test_index, hargs = args
+    max_depth, min_samples_split, min_impurity, alpha = hargs
+    # 加权重
+    train_data = tree_data.filter(items=train_index, axis=0)
+    train_data['weight'] = 1
+    test_data = tree_data.filter(items=test_index, axis=0)
+    test_data['weight'] = 1
+
+    # 构造树
+    tree = build_tree(train_data, neg_gini_index, hargs=hargs)
+    true_survived = test_data['Survived']
+    # 剪枝前
+    '''former_res = data_tree_classify(test_data, tree)
+    former_error = np.mean(np.array(former_res) != np.array(true_survived))'''
+    # 剪枝后
+    tree = cut_branch(test_data, tree, alpha)
+    #print(tree)
+    res = data_tree_classify(test_data, tree)
+    error = np.mean(np.array(res) != np.array(true_survived))
+    if error<0.8:
+        plt_tree(tree)
+    return error
 
 if __name__ == '__main__':
-    min_samples_split = 1
+    min_samples_split = 5
     min_impurity = 0
     alpha = 0
-    err_list = []
-    for train_index, test_index in kf.split(tree_data):
-        # 加权重
-        train_data = tree_data.filter(items=train_index, axis=0)
-        train_data['weight'] = 1
-        test_data = tree_data.filter(items=test_index, axis=0)
-        test_data['weight'] = 1
+    max_depth = 7
+    max_workers = None
+    hargs=max_depth, min_samples_split, min_impurity, alpha
+    # 准备参数
+    args_list = [(train_index, test_index, hargs)
+                 for train_index, test_index in kf.split(tree_data)]
+    # 使用进程池并行处理
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        err_list = list(executor.map(train_and_evaluate_fold, args_list))
 
-        # 构造树
-        max_depth = 5
-        tree = build_tree(train_data, neg_gini_index, max_depth=max_depth)
-        true_survived = test_data['Survived']
-        tree = cut_branch(test_data, tree)
-        res = data_tree_classify(test_data, tree)
-        error = np.mean(np.array(res) != np.array(true_survived))
-        if error <= 0.13:
-            plt_tree(tree)
-        err_list.append(error)
+
     print(err_list)
+
+'''[np.float64(0.13333333333333333), 
+np.float64(0.1348314606741573), 
+np.float64(0.14606741573033707), 
+np.float64(0.1797752808988764), 
+np.float64(0.11235955056179775), 
+np.float64(0.07865168539325842), 
+np.float64(0.19101123595505617), 
+np.float64(0.21348314606741572), 
+np.float64(0.19101123595505617), 
+np.float64(0.07865168539325842)]'''
+
+'''[np.float64(0.13333333333333333), 
+np.float64(0.1348314606741573), 
+np.float64(0.11235955056179775), 
+np.float64(0.16853932584269662), 
+np.float64(0.12359550561797752), 
+np.float64(0.06741573033707865), 
+np.float64(0.19101123595505617), 
+np.float64(0.21348314606741572), 
+np.float64(0.2247191011235955), 
+np.float64(0.056179775280898875)]'''
