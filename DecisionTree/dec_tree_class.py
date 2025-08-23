@@ -66,8 +66,12 @@ def neg_gini_index(df, name, boundary, target_col='target'):
 class CustomDecisionTree(BaseEstimator, ClassifierMixin):
     def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1,
                  min_impurity=0.0, alpha=0.0, random_state=None, criterion='gini',
-                 verbose=0):
-        # 初始化参数
+                 verbose=1, progress_interval=10):
+        # 初始化参数...
+        self.progress_interval = progress_interval
+        self.node_count = 0
+        self.start_time = None
+        self.total_nodes_estimate = 0  # 估计的总节点数
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
@@ -97,10 +101,19 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
 
 
     def fit(self, X, y):
-        """训练决策树"""
         if self.verbose > 0:
-            self.logger.info("开始训练决策树")
-            self.logger.info(f"参数: max_depth={self.max_depth}, criterion={self.criterion}")
+            print(f"开始训练决策树 - 参数: max_depth={self.max_depth}, criterion={self.criterion}")
+
+        self.start_time = time.time()
+        self.node_count = 0  # 重置节点计数
+
+        # 估计总节点数 (简化估计: 2^(max_depth+1)-1)
+        if self.max_depth is not None:
+            self.total_nodes_estimate = 2**(self.max_depth+1) - 1
+        else:
+            # 如果没有最大深度限制，基于特征数量估计
+            n_features = X.shape[1] if hasattr(X, 'shape') else len(X.columns)
+            self.total_nodes_estimate = n_features * 10  # 简单估计
 
         start_time = time.time()
         # 设置随机种子
@@ -230,6 +243,19 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
 
     def _build_tree(self, data, f, hargs, depth=0):
         """建树算法实现"""
+        # 增加节点计数
+        self.node_count += 1
+
+        # 定期报告进度
+        if self.verbose > 0 and self.node_count % self.progress_interval == 0:
+            elapsed = time.time() - self.start_time
+            progress = min(1.0, self.node_count / self.total_nodes_estimate)
+            estimated_total = elapsed / progress if progress > 0 else float('inf')
+            remaining = estimated_total - elapsed
+
+            print(f"进度: {self.node_count}/{self.total_nodes_estimate} "
+                  f"({progress*100:.1f}%) - 已用时间: {elapsed:.1f}s - "
+                  f"预计剩余: {remaining:.1f}s")
         name, boundary, gain_val = self._choose_feature(data, f)
 
         # 提前终止条件
@@ -380,7 +406,7 @@ if __name__ == '__main__':
         param_grid=param_grid,
         scoring='accuracy',
         cv=5,
-        n_jobs=-1,
+        n_jobs=1,
         verbose=1
     )
 
