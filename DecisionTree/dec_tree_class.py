@@ -1,13 +1,82 @@
 import logging
-import os
 import time
-from tqdm import tqdm
 import pandas as pd
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics import accuracy_score
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.datasets import make_classification
+from tqdm import tqdm
+import threading
+from collections import defaultdict
+
+# 全局进度跟踪器
+class ProgressTracker:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(ProgressTracker, cls).__new__(cls)
+                cls._instance._init()
+            return cls._instance
+
+    def _init(self):
+        self.total_fits = 0
+        self.completed_fits = 0
+        self.start_time = None
+        self.progress_bar = None
+        self.fit_times = defaultdict(list)
+
+    def init_progress(self, total_fits):
+        self.total_fits = total_fits
+        self.completed_fits = 0
+        self.start_time = time.time()
+        self.progress_bar = tqdm(total=total_fits, desc="总体进度", unit="fit")
+
+    def update_progress(self, params, fit_time):
+        with self._lock:
+            self.completed_fits += 1
+            # 记录每种参数组合的拟合时间
+            param_key = str({k: v for k, v in params.items() if k != 'verbose'})
+            self.fit_times[param_key].append(fit_time)
+
+            if self.progress_bar:
+                # 更新进度条
+                self.progress_bar.update(1)
+
+                # 计算估计剩余时间
+                elapsed = time.time() - self.start_time
+                avg_time_per_fit = elapsed / self.completed_fits
+                remaining_fits = self.total_fits - self.completed_fits
+                remaining_time = avg_time_per_fit * remaining_fits
+
+                # 更新进度条描述
+                self.progress_bar.set_postfix({
+                    '已用时间': f"{elapsed:.1f}s",
+                    '剩余时间': f"{remaining_time:.1f}s",
+                    '平均时间/拟合': f"{avg_time_per_fit:.2f}s"
+                })
+
+    def finish(self):
+        if self.progress_bar:
+            self.progress_bar.close()
+
+        # 打印摘要信息
+        elapsed = time.time() - self.start_time
+        print(f"\n训练完成! 总共 {self.total_fits} 次拟合，耗时 {elapsed:.1f} 秒")
+        print(f"平均每次拟合时间: {elapsed / self.total_fits:.2f} 秒")
+
+        # 找出最快和最慢的参数组合
+        if self.fit_times:
+            avg_times = {k: sum(v) / len(v) for k, v in self.fit_times.items()}
+            fastest = min(avg_times.items(), key=lambda x: x[1])
+            slowest = max(avg_times.items(), key=lambda x: x[1])
+
+            print(f"最快的参数组合: {fastest[0]} (平均 {fastest[1]:.2f} 秒/拟合)")
+            print(f"最慢的参数组合: {slowest[0]} (平均 {slowest[1]:.2f} 秒/拟合)")
+
 
 # 配置日志
 logging.basicConfig(
@@ -66,12 +135,8 @@ def neg_gini_index(df, name, boundary, target_col='target'):
 class CustomDecisionTree(BaseEstimator, ClassifierMixin):
     def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1,
                  min_impurity=0.0, alpha=0.0, random_state=None, criterion='gini',
-                 verbose=1, progress_interval=10):
-        # 初始化参数...
-        self.progress_interval = progress_interval
-        self.node_count = 0
-        self.start_time = None
-        self.total_nodes_estimate = 0  # 估计的总节点数
+                 verbose=0, progress_interval=10):
+        # 初始化参数
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
@@ -80,9 +145,13 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.random_state = random_state
         self.criterion = criterion
         self.verbose = verbose
+        self.progress_interval = progress_interval
         self.tree_ = None
         self.feature_names_ = None
         self.target_col_ = 'target'
+        self.node_count = 0
+        self.start_time = None
+        self.total_nodes_estimate = 0
 
         # 设置日志
         self.logger = logging.getLogger("CustomDecisionTree")
@@ -101,21 +170,22 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
 
 
     def fit(self, X, y):
+        """训练决策树"""
+        # 记录开始时间
+        fit_start_time = time.time()
+
         if self.verbose > 0:
             print(f"开始训练决策树 - 参数: max_depth={self.max_depth}, criterion={self.criterion}")
 
         self.start_time = time.time()
-        self.node_count = 0  # 重置节点计数
+        self.node_count = 0
 
-        # 估计总节点数 (简化估计: 2^(max_depth+1)-1)
+        # 估计总节点数
         if self.max_depth is not None:
-            self.total_nodes_estimate = 2**(self.max_depth+1) - 1
+            self.total_nodes_estimate = 2 ** (self.max_depth + 1) - 1
         else:
-            # 如果没有最大深度限制，基于特征数量估计
             n_features = X.shape[1] if hasattr(X, 'shape') else len(X.columns)
-            self.total_nodes_estimate = n_features * 10  # 简单估计
-
-        start_time = time.time()
+            self.total_nodes_estimate = n_features * 10
         # 设置随机种子
         if self.random_state is not None:
             np.random.seed(self.random_state)
@@ -138,9 +208,15 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.tree_ = self._build_tree(data, self.split_func, hargs=hargs)
 
         if self.verbose > 0:
-            elapsed_time = time.time() - start_time
-            self.logger.info(f"训练完成，耗时: {elapsed_time:.2f} 秒")
-            print(f"训练完成，耗时: {elapsed_time:.2f} 秒")
+            elapsed_time = time.time() - self.start_time
+            print(f"训练完成，耗时: {elapsed_time:.2f} 秒，共构建 {self.node_count} 个节点")
+
+            # 计算拟合时间
+        fit_time = time.time() - fit_start_time
+
+        # 更新全局进度
+        progress_tracker = ProgressTracker()
+        progress_tracker.update_progress(self.get_params(), fit_time)
         return self
 
     def predict(self, X):
@@ -246,16 +322,17 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         # 增加节点计数
         self.node_count += 1
 
-        # 定期报告进度
+        # 定期报告进度（仅在详细模式下）
         if self.verbose > 0 and self.node_count % self.progress_interval == 0:
             elapsed = time.time() - self.start_time
             progress = min(1.0, self.node_count / self.total_nodes_estimate)
             estimated_total = elapsed / progress if progress > 0 else float('inf')
             remaining = estimated_total - elapsed
 
-            print(f"进度: {self.node_count}/{self.total_nodes_estimate} "
-                  f"({progress*100:.1f}%) - 已用时间: {elapsed:.1f}s - "
-                  f"预计剩余: {remaining:.1f}s")
+            print(f"节点: {self.node_count}/{self.total_nodes_estimate} "
+                  f"({progress * 100:.1f}%) - 时间: {elapsed:.1f}s "
+                  f"[剩余: {remaining:.1f}s]")
+
         name, boundary, gain_val = self._choose_feature(data, f)
 
         # 提前终止条件
@@ -387,9 +464,6 @@ if __name__ == '__main__':
     X, y = make_classification(n_samples=1000, n_features=20, random_state=42)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # 创建自定义决策树实例
-    custom_tree = CustomDecisionTree()
-
     # 定义参数网格
     param_grid = {
         'max_depth': [3, 5, 7, 10, None],
@@ -400,18 +474,32 @@ if __name__ == '__main__':
         'criterion': ['gini', 'entropy']
     }
 
+    # 计算总拟合次数
+    n_splits = 5  # 交叉验证折数
+    n_params = len(param_grid['max_depth']) * len(param_grid['min_samples_split']) * \
+               len(param_grid['min_samples_leaf']) * len(param_grid['min_impurity']) * \
+            len(param_grid['alpha']) * len(param_grid['criterion'])
+    total_fits = n_splits * n_params
+
+    # 初始化进度跟踪器
+    progress_tracker = ProgressTracker()
+    progress_tracker.init_progress(total_fits)
+
     # 创建 GridSearchCV
     grid_search = GridSearchCV(
-        estimator=custom_tree,
+        estimator=CustomDecisionTree(verbose=0),  # 关闭单个决策树的详细输出
         param_grid=param_grid,
         scoring='accuracy',
         cv=5,
         n_jobs=1,
-        verbose=1
+        verbose=0  # 关闭 GridSearchCV 的默认输出
     )
 
     # 执行网格搜索
     grid_search.fit(X_train, y_train)
+
+    # 完成进度跟踪
+    progress_tracker.finish()
 
     # 输出最佳参数和得分
     print("最佳参数:", grid_search.best_params_)
