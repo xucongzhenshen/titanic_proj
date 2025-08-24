@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import time
 import pandas as pd
 import numpy as np
@@ -13,56 +14,45 @@ from collections import defaultdict
 # 全局进度跟踪器
 class ProgressTracker:
     _instance = None
-    _lock = threading.Lock()
 
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(ProgressTracker, cls).__new__(cls)
-                cls._instance._init()
-            return cls._instance
+        if cls._instance is None:
+            cls._instance = super(ProgressTracker, cls).__new__(cls)
+            cls._instance._init()
+        return cls._instance
 
     def _init(self):
         self.total_fits = 0
         self.completed_fits = 0
         self.start_time = None
-        self.progress_bar = None
+        self.n_jobs = 0
         self.fit_times = defaultdict(list)
 
-    def init_progress(self, total_fits):
+    def init_progress(self, total_fits, n_jobs):
         self.total_fits = total_fits
         self.completed_fits = 0
         self.start_time = time.time()
-        self.progress_bar = tqdm(total=total_fits, desc="总体进度", unit="fit")
+        self.n_jobs = n_jobs
 
     def update_progress(self, params, fit_time):
-        with self._lock:
-            self.completed_fits += 1
-            # 记录每种参数组合的拟合时间
-            param_key = str({k: v for k, v in params.items() if k != 'verbose'})
-            self.fit_times[param_key].append(fit_time)
+        self.completed_fits += 1
+        # 记录每种参数组合的拟合时间
+        param_key = str({k: v for k, v in params.items() if k != 'verbose'})
+        self.fit_times[param_key].append(fit_time)
 
-            if self.progress_bar:
-                # 更新进度条
-                self.progress_bar.update(1)
 
-                # 计算估计剩余时间
-                elapsed = time.time() - self.start_time
-                avg_time_per_fit = elapsed / self.completed_fits
-                remaining_fits = self.total_fits - self.completed_fits
-                remaining_time = avg_time_per_fit * remaining_fits
+        # 计算估计剩余时间
+        elapsed = time.time() - self.start_time
+        avg_time_per_fit = elapsed / self.completed_fits
+        remaining_fits = self.total_fits - self.completed_fits
+        remaining_time = avg_time_per_fit * remaining_fits
 
-                # 更新进度条描述
-                self.progress_bar.set_postfix({
-                    '已用时间': f"{elapsed:.1f}s",
-                    '剩余时间': f"{remaining_time:.1f}s",
-                    '平均时间/拟合': f"{avg_time_per_fit:.2f}s"
-                })
+        print(f"已训练: {self.completed_fits}fits \
+                已用时间: {elapsed:.1f}s \
+                剩余时间: {remaining_time:.1f}s \
+                平均时间/拟合: {avg_time_per_fit:.2f}s")
 
     def finish(self):
-        if self.progress_bar:
-            self.progress_bar.close()
-
         # 打印摘要信息
         elapsed = time.time() - self.start_time
         print(f"\n训练完成! 总共 {self.total_fits} 次拟合，耗时 {elapsed:.1f} 秒")
@@ -76,6 +66,7 @@ class ProgressTracker:
 
             print(f"最快的参数组合: {fastest[0]} (平均 {fastest[1]:.2f} 秒/拟合)")
             print(f"最慢的参数组合: {slowest[0]} (平均 {slowest[1]:.2f} 秒/拟合)")
+
 
 
 # 配置日志
@@ -482,8 +473,9 @@ if __name__ == '__main__':
     total_fits = n_splits * n_params
 
     # 初始化进度跟踪器
+    n_jobs = 4
     progress_tracker = ProgressTracker()
-    progress_tracker.init_progress(total_fits)
+    progress_tracker.init_progress(total_fits, n_jobs=n_jobs)
 
     # 创建 GridSearchCV
     grid_search = GridSearchCV(
@@ -491,7 +483,7 @@ if __name__ == '__main__':
         param_grid=param_grid,
         scoring='accuracy',
         cv=5,
-        n_jobs=1,
+        n_jobs=n_jobs,
         verbose=0  # 关闭 GridSearchCV 的默认输出
     )
 
