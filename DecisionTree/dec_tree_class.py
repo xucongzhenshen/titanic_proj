@@ -1,13 +1,13 @@
 import logging
 import os
 import time
-from tqdm import tqdm
-import pandas as pd
+
 import numpy as np
-from sklearn.base import BaseEstimator, ClassifierMixin
+import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.metrics import accuracy_score
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from sklearn.model_selection import KFold
+from sklearn.model_selection import ParameterGrid
+from tqdm.contrib.concurrent import process_map
 
 # 配置日志
 logging.basicConfig(
@@ -66,7 +66,7 @@ def neg_gini_index(df, name, boundary, target_col='target'):
 class CustomDecisionTree(BaseEstimator, ClassifierMixin):
     def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1,
                  min_impurity=0.0, alpha=0.0, random_state=None, criterion='gini',
-                 verbose=1, progress_interval=10):
+                 verbose=0, progress_interval=10):
         # 初始化参数...
         self.progress_interval = progress_interval
         self.node_count = 0
@@ -265,6 +265,7 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         # 更多终止条件
         max_depth, min_samples_split, min_impurity, alpha, min_samples_leaf = hargs
         stop_conditions = [
+            name is None,
             max_depth is not None and depth >= max_depth,  # 最大深度
             n_samples < min_samples_leaf,  # 最小样本数
             total_weight < min_samples_split,  # 最小权重和
@@ -377,19 +378,46 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.tree_ = self._cut_branch(data, self.tree_, self.alpha)
         return self
 
+# 将 train_model 函数移到模块级别（if __name__ == '__main__' 之外）
+def train_model(args):
+    """训练单个模型并返回结果"""
+    params, estimator, X_train, y_train, X_test, y_test = args
+    start_time = time.time()
 
+    # 克隆 estimator 并设置参数
+    model = clone(estimator)
+    model.set_params(**params)
+
+    # 训练模型
+    model.fit(X_train, y_train)
+
+    # 计算训练时间
+    fit_time = time.time() - start_time
+
+    # 评估模型
+    train_score = model.score(X_train, y_train)
+    test_score = model.score(X_test, y_test)
+
+    return {
+        'params': params,
+        'model': model,
+        'fit_time': fit_time,
+        'train_score': train_score,
+        'test_score': test_score
+    }
 # 使用示例
 if __name__ == '__main__':
     from sklearn.datasets import make_classification
-    from sklearn.model_selection import GridSearchCV, train_test_split
+    from sklearn.model_selection import train_test_split
 
-    # 创建示例数据
-    X, y = make_classification(n_samples=1000, n_features=20, random_state=42)
+    train_data = pd.read_csv('tree_train.csv')
+    train_data['weight'] = 1
+    y = train_data['Survived']
+    X = train_data.drop(columns=['Survived'])
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # 创建自定义决策树实例
-    custom_tree = CustomDecisionTree()
-
+    estimator = CustomDecisionTree()
     # 定义参数网格
     param_grid = {
         'max_depth': [3, 5, 7, 10, None],
@@ -399,34 +427,38 @@ if __name__ == '__main__':
         'alpha': [0.0, 0.1, 0.2],
         'criterion': ['gini', 'entropy']
     }
+    # 使用 process_map 进行并行网格搜索
+    param_list = list(ParameterGrid(param_grid))
+    args_list = [(params, estimator, X_train, y_train, X_test, y_test) for params in param_list]
 
-    # 创建 GridSearchCV
-    grid_search = GridSearchCV(
-        estimator=custom_tree,
-        param_grid=param_grid,
-        scoring='accuracy',
-        cv=5,
-        n_jobs=1,
-        verbose=1
+    n_jobs = int(0.8 * os.cpu_count())
+    # 使用 process_map 进行并行网格搜索
+    results = process_map(
+        train_model,
+        args_list,
+        max_workers=n_jobs,  # 最大工作进程数
+        desc="网格搜索进度",
+        unit="模型",
+        chunksize=2 * n_jobs  # 添加 chunksize 参数
     )
 
-    # 执行网格搜索
-    grid_search.fit(X_train, y_train)
+    # 处理结果
+    best_result = max(results, key=lambda x: x['test_score'])
+    print(f"最佳参数: {best_result['params']}")
+    print(f"测试集准确率: {best_result['test_score']:.4f}")
 
-    # 输出最佳参数和得分
-    print("最佳参数:", grid_search.best_params_)
-    print("最佳交叉验证得分:", grid_search.best_score_)
-    print("测试集得分:", grid_search.score(X_test, y_test))
 
-    # 使用最佳模型进行预测
-    best_model = grid_search.best_estimator_
-    predictions = best_model.predict(X_test)
-    print("预测结果示例:", predictions[:10])
     '''
     Fitting 5 folds for each of 1440 candidates, totalling 7200 fits
     最佳参数: {'alpha': 0.0, 'criterion': 'gini', 'max_depth': 5, 'min_impurity': 0.1, 'min_samples_leaf': 1, 'min_samples_split': 20}
     最佳交叉验证得分: 0.8975
     测试集得分: 0.905
     预测结果示例: [1 1 0 1 1 0 0 1 0 0]
+    
+    网格搜索进度: 100%|██████████| 1440/1440 [04:14<00:00,  5.66模型/s]
+    最佳参数: {'alpha': 0.0, 'criterion': 'gini', 'max_depth': 10, 'min_impurity': 0.0, 'min_samples_leaf': 1, 'min_samples_split': 2}
+    测试集准确率: 0.8436
 
     '''
+
+
