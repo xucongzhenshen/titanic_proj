@@ -1,73 +1,13 @@
 import logging
-import multiprocessing
+import os
 import time
-import pandas as pd
+
 import numpy as np
-from sklearn.base import BaseEstimator, ClassifierMixin
+import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.metrics import accuracy_score
-from sklearn.model_selection import GridSearchCV, train_test_split
-from sklearn.datasets import make_classification
-from tqdm import tqdm
-import threading
-from collections import defaultdict
-
-# 全局进度跟踪器
-class ProgressTracker:
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(ProgressTracker, cls).__new__(cls)
-            cls._instance._init()
-        return cls._instance
-
-    def _init(self):
-        self.total_fits = 0
-        self.completed_fits = 0
-        self.start_time = None
-        self.n_jobs = 0
-        self.fit_times = defaultdict(list)
-
-    def init_progress(self, total_fits, n_jobs):
-        self.total_fits = total_fits
-        self.completed_fits = 0
-        self.start_time = time.time()
-        self.n_jobs = n_jobs
-
-    def update_progress(self, params, fit_time):
-        self.completed_fits += 1
-        # 记录每种参数组合的拟合时间
-        param_key = str({k: v for k, v in params.items() if k != 'verbose'})
-        self.fit_times[param_key].append(fit_time)
-
-
-        # 计算估计剩余时间
-        elapsed = time.time() - self.start_time
-        avg_time_per_fit = elapsed / self.completed_fits
-        remaining_fits = self.total_fits - self.completed_fits
-        remaining_time = avg_time_per_fit * remaining_fits
-
-        print(f"已训练: {self.completed_fits}fits \
-                已用时间: {elapsed:.1f}s \
-                剩余时间: {remaining_time:.1f}s \
-                平均时间/拟合: {avg_time_per_fit:.2f}s")
-
-    def finish(self):
-        # 打印摘要信息
-        elapsed = time.time() - self.start_time
-        print(f"\n训练完成! 总共 {self.total_fits} 次拟合，耗时 {elapsed:.1f} 秒")
-        print(f"平均每次拟合时间: {elapsed / self.total_fits:.2f} 秒")
-
-        # 找出最快和最慢的参数组合
-        if self.fit_times:
-            avg_times = {k: sum(v) / len(v) for k, v in self.fit_times.items()}
-            fastest = min(avg_times.items(), key=lambda x: x[1])
-            slowest = max(avg_times.items(), key=lambda x: x[1])
-
-            print(f"最快的参数组合: {fastest[0]} (平均 {fastest[1]:.2f} 秒/拟合)")
-            print(f"最慢的参数组合: {slowest[0]} (平均 {slowest[1]:.2f} 秒/拟合)")
-
-
+from sklearn.model_selection import ParameterGrid
+from tqdm.contrib.concurrent import process_map
 
 # 配置日志
 logging.basicConfig(
@@ -127,7 +67,11 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
     def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1,
                  min_impurity=0.0, alpha=0.0, random_state=None, criterion='gini',
                  verbose=0, progress_interval=10):
-        # 初始化参数
+        # 初始化参数...
+        self.progress_interval = progress_interval
+        self.node_count = 0
+        self.start_time = None
+        self.total_nodes_estimate = 0  # 估计的总节点数
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
@@ -136,13 +80,9 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.random_state = random_state
         self.criterion = criterion
         self.verbose = verbose
-        self.progress_interval = progress_interval
         self.tree_ = None
         self.feature_names_ = None
         self.target_col_ = 'target'
-        self.node_count = 0
-        self.start_time = None
-        self.total_nodes_estimate = 0
 
         # 设置日志
         self.logger = logging.getLogger("CustomDecisionTree")
@@ -161,22 +101,21 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
 
 
     def fit(self, X, y):
-        """训练决策树"""
-        # 记录开始时间
-        fit_start_time = time.time()
-
         if self.verbose > 0:
             print(f"开始训练决策树 - 参数: max_depth={self.max_depth}, criterion={self.criterion}")
 
         self.start_time = time.time()
-        self.node_count = 0
+        self.node_count = 0  # 重置节点计数
 
-        # 估计总节点数
+        # 估计总节点数 (简化估计: 2^(max_depth+1)-1)
         if self.max_depth is not None:
-            self.total_nodes_estimate = 2 ** (self.max_depth + 1) - 1
+            self.total_nodes_estimate = 2**(self.max_depth+1) - 1
         else:
+            # 如果没有最大深度限制，基于特征数量估计
             n_features = X.shape[1] if hasattr(X, 'shape') else len(X.columns)
-            self.total_nodes_estimate = n_features * 10
+            self.total_nodes_estimate = n_features * 10  # 简单估计
+
+        start_time = time.time()
         # 设置随机种子
         if self.random_state is not None:
             np.random.seed(self.random_state)
@@ -199,15 +138,9 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.tree_ = self._build_tree(data, self.split_func, hargs=hargs)
 
         if self.verbose > 0:
-            elapsed_time = time.time() - self.start_time
-            print(f"训练完成，耗时: {elapsed_time:.2f} 秒，共构建 {self.node_count} 个节点")
-
-            # 计算拟合时间
-        fit_time = time.time() - fit_start_time
-
-        # 更新全局进度
-        progress_tracker = ProgressTracker()
-        progress_tracker.update_progress(self.get_params(), fit_time)
+            elapsed_time = time.time() - start_time
+            self.logger.info(f"训练完成，耗时: {elapsed_time:.2f} 秒")
+            print(f"训练完成，耗时: {elapsed_time:.2f} 秒")
         return self
 
     def predict(self, X):
@@ -313,17 +246,16 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         # 增加节点计数
         self.node_count += 1
 
-        # 定期报告进度（仅在详细模式下）
+        # 定期报告进度
         if self.verbose > 0 and self.node_count % self.progress_interval == 0:
             elapsed = time.time() - self.start_time
             progress = min(1.0, self.node_count / self.total_nodes_estimate)
             estimated_total = elapsed / progress if progress > 0 else float('inf')
             remaining = estimated_total - elapsed
 
-            print(f"节点: {self.node_count}/{self.total_nodes_estimate} "
-                  f"({progress * 100:.1f}%) - 时间: {elapsed:.1f}s "
-                  f"[剩余: {remaining:.1f}s]")
-
+            print(f"进度: {self.node_count}/{self.total_nodes_estimate} "
+                  f"({progress*100:.1f}%) - 已用时间: {elapsed:.1f}s - "
+                  f"预计剩余: {remaining:.1f}s")
         name, boundary, gain_val = self._choose_feature(data, f)
 
         # 提前终止条件
@@ -333,6 +265,7 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         # 更多终止条件
         max_depth, min_samples_split, min_impurity, alpha, min_samples_leaf = hargs
         stop_conditions = [
+            name is None,
             max_depth is not None and depth >= max_depth,  # 最大深度
             n_samples < min_samples_leaf,  # 最小样本数
             total_weight < min_samples_split,  # 最小权重和
@@ -445,16 +378,46 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
         self.tree_ = self._cut_branch(data, self.tree_, self.alpha)
         return self
 
+# 将 train_model 函数移到模块级别（if __name__ == '__main__' 之外）
+def train_model(args):
+    """训练单个模型并返回结果"""
+    params, estimator, X_train, y_train, X_test, y_test = args
+    start_time = time.time()
 
+    # 克隆 estimator 并设置参数
+    model = clone(estimator)
+    model.set_params(**params)
+
+    # 训练模型
+    model.fit(X_train, y_train)
+
+    # 计算训练时间
+    fit_time = time.time() - start_time
+
+    # 评估模型
+    train_score = model.score(X_train, y_train)
+    test_score = model.score(X_test, y_test)
+
+    return {
+        'params': params,
+        'model': model,
+        'fit_time': fit_time,
+        'train_score': train_score,
+        'test_score': test_score
+    }
 # 使用示例
 if __name__ == '__main__':
     from sklearn.datasets import make_classification
-    from sklearn.model_selection import GridSearchCV, train_test_split
+    from sklearn.model_selection import train_test_split
 
-    # 创建示例数据
-    X, y = make_classification(n_samples=1000, n_features=20, random_state=42)
+    train_data = pd.read_csv('tree_train.csv')
+    train_data['weight'] = 1
+    y = train_data['Survived']
+    X = train_data.drop(columns=['Survived'])
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+    # 创建自定义决策树实例
+    estimator = CustomDecisionTree()
     # 定义参数网格
     param_grid = {
         'max_depth': [3, 5, 7, 10, None],
@@ -464,49 +427,38 @@ if __name__ == '__main__':
         'alpha': [0.0, 0.1, 0.2],
         'criterion': ['gini', 'entropy']
     }
+    # 使用 process_map 进行并行网格搜索
+    param_list = list(ParameterGrid(param_grid))
+    args_list = [(params, estimator, X_train, y_train, X_test, y_test) for params in param_list]
 
-    # 计算总拟合次数
-    n_splits = 5  # 交叉验证折数
-    n_params = len(param_grid['max_depth']) * len(param_grid['min_samples_split']) * \
-               len(param_grid['min_samples_leaf']) * len(param_grid['min_impurity']) * \
-            len(param_grid['alpha']) * len(param_grid['criterion'])
-    total_fits = n_splits * n_params
-
-    # 初始化进度跟踪器
-    n_jobs = 4
-    progress_tracker = ProgressTracker()
-    progress_tracker.init_progress(total_fits, n_jobs=n_jobs)
-
-    # 创建 GridSearchCV
-    grid_search = GridSearchCV(
-        estimator=CustomDecisionTree(verbose=0),  # 关闭单个决策树的详细输出
-        param_grid=param_grid,
-        scoring='accuracy',
-        cv=5,
-        n_jobs=n_jobs,
-        verbose=0  # 关闭 GridSearchCV 的默认输出
+    n_jobs = int(0.8 * os.cpu_count())
+    # 使用 process_map 进行并行网格搜索
+    results = process_map(
+        train_model,
+        args_list,
+        max_workers=n_jobs,  # 最大工作进程数
+        desc="网格搜索进度",
+        unit="模型",
+        chunksize=2 * n_jobs  # 添加 chunksize 参数
     )
 
-    # 执行网格搜索
-    grid_search.fit(X_train, y_train)
+    # 处理结果
+    best_result = max(results, key=lambda x: x['test_score'])
+    print(f"最佳参数: {best_result['params']}")
+    print(f"测试集准确率: {best_result['test_score']:.4f}")
 
-    # 完成进度跟踪
-    progress_tracker.finish()
 
-    # 输出最佳参数和得分
-    print("最佳参数:", grid_search.best_params_)
-    print("最佳交叉验证得分:", grid_search.best_score_)
-    print("测试集得分:", grid_search.score(X_test, y_test))
-
-    # 使用最佳模型进行预测
-    best_model = grid_search.best_estimator_
-    predictions = best_model.predict(X_test)
-    print("预测结果示例:", predictions[:10])
     '''
     Fitting 5 folds for each of 1440 candidates, totalling 7200 fits
     最佳参数: {'alpha': 0.0, 'criterion': 'gini', 'max_depth': 5, 'min_impurity': 0.1, 'min_samples_leaf': 1, 'min_samples_split': 20}
     最佳交叉验证得分: 0.8975
     测试集得分: 0.905
     预测结果示例: [1 1 0 1 1 0 0 1 0 0]
+    
+    网格搜索进度: 100%|██████████| 1440/1440 [04:14<00:00,  5.66模型/s]
+    最佳参数: {'alpha': 0.0, 'criterion': 'gini', 'max_depth': 10, 'min_impurity': 0.0, 'min_samples_leaf': 1, 'min_samples_split': 2}
+    测试集准确率: 0.8436
 
     '''
+
+
