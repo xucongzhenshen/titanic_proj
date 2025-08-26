@@ -64,7 +64,7 @@ def neg_gini_index(df, name, boundary, target_col='target'):
 
 
 class CustomDecisionTree(BaseEstimator, ClassifierMixin):
-    def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1,
+    def __init__(self, max_depth=8, min_samples_split=18, min_samples_leaf=1,
                  min_impurity=0.0, alpha=0.0, random_state=None, criterion='gini',
                  verbose=0, progress_interval=10):
         # 初始化参数...
@@ -390,6 +390,7 @@ def train_model(args):
 
     # 训练模型
     model.fit(X_train, y_train)
+    model.prune(X_test, y_test)
 
     # 计算训练时间
     fit_time = time.time() - start_time
@@ -407,47 +408,56 @@ def train_model(args):
     }
 # 使用示例
 if __name__ == '__main__':
-    from sklearn.datasets import make_classification
     from sklearn.model_selection import train_test_split
 
     train_data = pd.read_csv('tree_train.csv')
     train_data['weight'] = 1
     y = train_data['Survived']
     X = train_data.drop(columns=['Survived'])
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
 
     # 创建自定义决策树实例
     estimator = CustomDecisionTree()
     # 定义参数网格
     param_grid = {
-        'max_depth': [3, 5, 7, 10, None],
-        'min_samples_split': [2, 5, 10, 20],
-        'min_samples_leaf': [1, 2, 5, 10],
-        'min_impurity': [0.0, 0.1, 0.2],
-        'alpha': [0.0, 0.1, 0.2],
-        'criterion': ['gini', 'entropy']
+        'max_depth': [8],
+        'min_samples_split': [16, 17, 18, 19],
+        'criterion': ['gini', 'entropy'],
+        'alpha': [0.0, 0.001, 0.01, 0.1, 1]
     }
     # 使用 process_map 进行并行网格搜索
     param_list = list(ParameterGrid(param_grid))
     args_list = [(params, estimator, X_train, y_train, X_test, y_test) for params in param_list]
 
     n_jobs = int(0.8 * os.cpu_count())
-    # 使用 process_map 进行并行网格搜索
-    results = process_map(
+
+    param_list = list(ParameterGrid(param_grid))
+    args_list = [(params, estimator, X_train, y_train, X_test, y_test) for params in param_list]
+    results_ = process_map(
         train_model,
         args_list,
         max_workers=n_jobs,  # 最大工作进程数
         desc="网格搜索进度",
         unit="模型",
-        chunksize=2 * n_jobs  # 添加 chunksize 参数
+        chunksize=1  # 添加 chunksize 参数
     )
-
     # 处理结果
-    best_result = max(results, key=lambda x: x['test_score'])
-    print(f"最佳参数: {best_result['params']}")
-    print(f"测试集准确率: {best_result['test_score']:.4f}")
+    best_result_ = max(results_, key=lambda x: x['test_score'])
+    print(f"最佳参数: {best_result_['params']}")
+    print(f"测试集准确率: {best_result_['test_score']:.4f}")
 
-
+    my_estimator = CustomDecisionTree()
+    my_estimator.fit(X, y)
+    my_estimator.alpha = best_result_['params']['alpha']
+    test_data = pd.read_csv('tree_test.csv')
+    raw_test_data = pd.read_csv('test.csv')
+    y_pred = my_estimator.predict(test_data)
+    submission = pd.DataFrame({
+        'PassengerId': raw_test_data['PassengerId'],
+        'Survived': y_pred.astype(int)
+    })
+    print(my_estimator.predict(test_data))
+    submission.to_csv('tree_result.csv', index = False)
     '''
     Fitting 5 folds for each of 1440 candidates, totalling 7200 fits
     最佳参数: {'alpha': 0.0, 'criterion': 'gini', 'max_depth': 5, 'min_impurity': 0.1, 'min_samples_leaf': 1, 'min_samples_split': 20}
