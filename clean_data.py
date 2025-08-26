@@ -44,6 +44,9 @@ class CleanData:
         self.df['Embarked'].fillna('S')
         return self
 
+    def fill_Fare(self):
+        self.df['Fare'].fillna(self.df['Fare'].mean(), inplace=True)
+        return self
     '''one hot encode'''
     def one_hot_encode(self,names):
         for name in names:
@@ -153,7 +156,7 @@ print(train_df)
 print(test_df)'''
 
 
-tree_train_data = CleanData(train_df).extract_title().clean()
+'''tree_train_data = CleanData(train_df).extract_title().clean()
 #mapping = tree_train_data.tree_encode_map()
 tree_train_data.tree_encode2()
 tree_train_data.save('cleaned_data/tree_train.csv')
@@ -161,5 +164,16 @@ print(tree_train_data)
 
 tree_test_data = CleanData(test_df).extract_title().clean().tree_encode2()
 tree_test_data.save('cleaned_data/tree_test.csv')
-print(tree_test_data)
+print(tree_test_data)'''
 
+rf_train_data = (CleanData(train_df).extract_title()
+                 .imputed_age().clean().fill_Embarked()
+                 .one_hot_encode(['Title','Embarked']).encode())
+rf_train_data.save('cleaned_data/rf_train.csv')
+print(rf_train_data)
+
+rf_test_data = (CleanData(test_df).extract_title()
+                .imputed_age().clean().fill_Embarked()
+                .one_hot_encode(['Title','Embarked']).encode().fill_Fare())
+rf_test_data.save('cleaned_data/rf_test.csv')
+print(rf_test_data)
